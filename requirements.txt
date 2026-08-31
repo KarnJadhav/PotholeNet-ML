@@ -1,0 +1,21 @@
+# PotholeNet 2.0 ML service — compatible version set
+# Pin torch/torchvision together; ultralytics tracks recent torch releases.
+# For CUDA builds, install torch/torchvision from https://pytorch.org/get-started/locally/
+# BEFORE running `pip install -r requirements.txt` (this file assumes CPU wheels by default).
+
+ultralytics==8.3.0
+torch==2.4.1
+torchvision==0.19.1
+fastapi==0.115.0
+uvicorn[standard]==0.30.6
+python-multipart==0.0.9
+pillow==10.4.0
+opencv-python-headless==4.10.0.84
+numpy==1.26.4
+python-dotenv==1.0.1
+pydantic==2.9.2
+
+# Dataset QC / dev tooling
+pandas==2.2.2
+tqdm==4.66.5
+imagehash==4.3.1
