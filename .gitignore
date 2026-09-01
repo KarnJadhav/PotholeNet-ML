@@ -1,2 +1,12 @@
-.datasets/
-.env
+# PotholeNet-ML/ml-service/.gitignore
+datasets/potholes/images/
+datasets/potholes/labels/
+models/*.pt
+runs/
+*.cache
+__pycache__/
+qc_preview/
+dedupe_review/
+prediction_review/
+val_predictions.json
+validation*.txt
