@@ -1,4 +1,3 @@
-# PotholeNet-ML/ml-service/.gitignore
 datasets/potholes/images/
 datasets/potholes/labels/
 models/*.pt
