@@ -43,6 +43,7 @@ Usage:
 """
 import argparse
 import csv
+import hashlib
 import random
 import shutil
 import xml.etree.ElementTree as ET
@@ -139,6 +140,86 @@ def load_sequence_manifest(path: Path | None):
     return mapping
 
 
+def md5_of(path: Path) -> str:
+    h = hashlib.md5()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+class _UnionFind:
+    def __init__(self, items):
+        self.parent = {x: x for x in items}
+
+    def find(self, x):
+        while self.parent[x] != x:
+            self.parent[x] = self.parent[self.parent[x]]
+            x = self.parent[x]
+        return x
+
+    def union(self, a, b):
+        ra, rb = self.find(a), self.find(b)
+        if ra != rb:
+            self.parent[ra] = rb
+
+
+def dedupe_by_content(items, phash_thresh=6):
+    """Drop items whose image content is a duplicate (exact md5 OR near-identical
+    phash, e.g. same photo re-saved as .png vs .jpg from two re-hosted sources)
+    of an EARLIER item. Keeps the first occurrence per cluster.
+    O(n^2) phash comparison — fine for a few thousand images; if this gets slow
+    on a much larger merge, restrict comparisons to same-sequence-prefix buckets."""
+    import imagehash
+    from PIL import Image
+
+    paths = [img_path for img_path, _, _ in items]
+    by_path = {img_path: (lines, seq_id) for img_path, lines, seq_id in items}
+
+    md5s, phashes = {}, {}
+    for p in paths:
+        md5s[p] = md5_of(p)
+        try:
+            phashes[p] = imagehash.phash(Image.open(p))
+        except Exception:
+            phashes[p] = None
+
+    uf = _UnionFind(paths)
+    by_md5 = defaultdict(list)
+    for p in paths:
+        by_md5[md5s[p]].append(p)
+    for group in by_md5.values():
+        for p in group[1:]:
+            uf.union(group[0], p)
+
+    n = len(paths)
+    for i in range(n):
+        if phashes[paths[i]] is None:
+            continue
+        for j in range(i + 1, n):
+            if phashes[paths[j]] is None:
+                continue
+            if phashes[paths[i]] - phashes[paths[j]] <= phash_thresh:
+                uf.union(paths[i], paths[j])
+
+    clusters = defaultdict(list)
+    for p in paths:
+        clusters[uf.find(p)].append(p)
+
+    kept_paths = set()
+    dropped = 0
+    for members in clusters.values():
+        members_sorted = sorted(members, key=lambda p: p.name)
+        kept_paths.add(members_sorted[0])
+        dropped += len(members_sorted) - 1
+
+    kept = [(p, by_path[p][0], by_path[p][1]) for p in paths if p in kept_paths]
+    if dropped:
+        print(f"[dedupe] dropped {dropped} duplicate images (exact or near-identical "
+              f"content across sources/formats)")
+    return kept
+
+
 def split_by_sequence(items, train_frac, val_frac, seed):
     """Group items by sequence_id, shuffle groups, assign whole groups to splits."""
     groups = defaultdict(list)
@@ -218,6 +299,9 @@ def main():
         return
 
     print(f"\nTotal merged images before split: {len(all_items)}")
+
+    all_items = dedupe_by_content(all_items)
+    print(f"Total images after content dedup: {len(all_items)}")
 
     splits = split_by_sequence(all_items, args.train_frac, args.val_frac, args.seed)
     for split_name in ("train", "val", "test"):

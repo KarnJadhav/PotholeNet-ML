@@ -73,7 +73,10 @@ def main():
         device=device,
     )
 
-    run_dir = Path(args.project) / run_name
+    # Don't assume the save dir matches args.name — Ultralytics auto-increments
+    # (potholenet_yolo11n_v1 -> _v12, _v13, ...) if a prior/interrupted run already
+    # used that name. Always read back the ACTUAL dir it used.
+    run_dir = Path(model.trainer.save_dir)
     counts = dataset_counts(args.data)
 
     metadata = {

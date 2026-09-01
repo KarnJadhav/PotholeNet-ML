@@ -1,0 +1,23 @@
+{
+  "timestamp_utc": "2026-09-01T10:15:37.077127+00:00",
+  "model_checkpoint": "yolo11n.pt",
+  "dataset_yaml": "../datasets/potholes/data.yaml",
+  "dataset_version_tag": "unspecified",
+  "dataset_counts": {
+    "train": 896,
+    "val": 435,
+    "test": 257
+  },
+  "epochs": 100,
+  "imgsz": 640,
+  "batch": 8,
+  "device": "0",
+  "gpu_name": "NVIDIA GeForce RTX 5060",
+  "ultralytics_version": "8.3.0",
+  "torch_version": "2.11.0+cu128",
+  "python_version": "3.11.16",
+  "git_commit": "unknown (not a git repo or git unavailable)",
+  "run_dir": "runs/potholenet_yolo11n_v1",
+  "best_weights": "runs/potholenet_yolo11n_v1/weights/best.pt",
+  "last_weights": "runs/potholenet_yolo11n_v1/weights/last.pt"
+}
