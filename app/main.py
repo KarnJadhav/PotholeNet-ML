@@ -14,11 +14,16 @@ from pathlib import Path
 from dotenv import load_dotenv
 from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
+from huggingface_hub import hf_hub_download
 from PIL import Image, UnidentifiedImageError
 from pydantic import BaseModel
 
+from .severity import Detection as SeverityInput, estimate_severity
+
 load_dotenv()
 
+HF_MODEL_REPO = os.getenv("ML_HF_MODEL_REPO", "")  # e.g. "username/PotholeNet-YOLO11n"
+HF_MODEL_FILE = os.getenv("ML_HF_MODEL_FILE", "best.pt")
 MODEL_PATH = os.getenv("ML_MODEL_PATH", "models/potholenet_best.pt")
 CONFIDENCE_THRESHOLD = float(os.getenv("ML_CONFIDENCE_THRESHOLD", "0.35"))
 MAX_IMAGE_SIZE_MB = float(os.getenv("ML_MAX_IMAGE_SIZE_MB", "10"))
@@ -38,9 +43,18 @@ model_state = {"model": None, "loaded": False, "load_error": None, "version": No
 async def lifespan(app: FastAPI):
     from ultralytics import YOLO
     try:
-        weights_path = Path(MODEL_PATH)
-        if not weights_path.exists():
-            raise FileNotFoundError(f"model weights not found at {weights_path}")
+        if HF_MODEL_REPO:
+            # Pull from Hugging Face Hub — this is how weights reach a fresh deploy
+            # (e.g. HF Spaces, Cloud Run, Render) without committing .pt files to git.
+            weights_path = Path(hf_hub_download(HF_MODEL_REPO, HF_MODEL_FILE))
+            logger.info(f"Downloaded weights from HF Hub: {HF_MODEL_REPO}/{HF_MODEL_FILE}")
+        else:
+            weights_path = Path(MODEL_PATH)
+            if not weights_path.exists():
+                raise FileNotFoundError(
+                    f"model weights not found at {weights_path}, and ML_HF_MODEL_REPO "
+                    f"is not set — nothing to download either"
+                )
         model_state["model"] = YOLO(str(weights_path))
         model_state["loaded"] = True
         model_state["version"] = weights_path.stem
@@ -77,11 +91,20 @@ class BBox(BaseModel):
     y2: float
 
 
+class SeverityOut(BaseModel):
+    label: str
+    score: float
+    reasons: list[str]
+    estimate_only: bool
+    caveat: str
+
+
 class Detection(BaseModel):
     class_id: int
     class_name: str
     confidence: float
     bbox: BBox
+    severity: SeverityOut | None = None
 
 
 class PredictResponse(BaseModel):
@@ -133,14 +156,29 @@ async def predict(file: UploadFile = File(...)):
             logger.warning(f"[{request_id}] inference exceeded configured timeout "
                             f"({elapsed_ms:.0f}ms > {TIMEOUT_MS}ms)")
 
+        img_w, img_h = Image.open(tmp_path).size
+
+        raw_boxes = [
+            (int(box.cls[0]), round(float(box.conf[0]), 4), [float(v) for v in box.xyxy[0]])
+            for box in results.boxes
+        ]
+        severity_inputs = [
+            SeverityInput(x1=b[0], y1=b[1], x2=b[2], y2=b[3], confidence=conf)
+            for _, conf, b in raw_boxes
+        ]
+        severities = estimate_severity(severity_inputs, image_width=img_w, image_height=img_h)
+
         detections = []
-        for box in results.boxes:
-            x1, y1, x2, y2 = [float(v) for v in box.xyxy[0]]
+        for (cls_id, conf, (x1, y1, x2, y2)), sev in zip(raw_boxes, severities):
             detections.append(Detection(
-                class_id=int(box.cls[0]),
+                class_id=cls_id,
                 class_name="pothole",
-                confidence=round(float(box.conf[0]), 4),
+                confidence=conf,
                 bbox=BBox(x1=round(x1, 1), y1=round(y1, 1), x2=round(x2, 1), y2=round(y2, 1)),
+                severity=SeverityOut(
+                    label=sev.label.value, score=sev.score, reasons=sev.reasons,
+                    estimate_only=sev.estimate_only, caveat=sev.caveat,
+                ),
             ))
 
         logger.info(f"[{request_id}] {len(detections)} detection(s) in {elapsed_ms:.1f}ms")
