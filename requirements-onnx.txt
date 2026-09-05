@@ -7,8 +7,8 @@ uvicorn[standard]==0.30.6
 python-multipart==0.0.9
 pillow==10.4.0
 opencv-python-headless==4.10.0.84
-numpy==1.26.4
+numpy>=1.26,<3
 python-dotenv==1.0.1
 pydantic==2.9.2
 huggingface_hub==0.25.1
-onnxruntime==1.19.2
+onnxruntime==1.29.0
