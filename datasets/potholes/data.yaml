@@ -1,5 +1,4 @@
-path: C:/Users/CW-PC/Desktop/PotholeNet-ML/ml-service/datasets/potholes
-
+path: /mnt/c/Users/CW-PC/Desktop/PotholeNet-ML/ml-service/datasets/potholes
 train: images/train
 val: images/val
 test: images/test

@@ -14,6 +14,7 @@ opencv-python-headless==4.10.0.84
 numpy==1.26.4
 python-dotenv==1.0.1
 pydantic==2.9.2
+huggingface_hub==0.25.1
 
 # Dataset QC / dev tooling
 pandas==2.2.2
