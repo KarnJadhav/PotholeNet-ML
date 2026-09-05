@@ -22,8 +22,9 @@ from .severity import Detection as SeverityInput, estimate_severity
 
 load_dotenv()
 
-HF_MODEL_REPO = os.getenv("ML_HF_MODEL_REPO", "")  # e.g. "username/PotholeNet-YOLO11n"
-HF_MODEL_FILE = os.getenv("ML_HF_MODEL_FILE", "best.pt")
+BACKEND = os.getenv("ML_BACKEND", "torch")  # "torch" (dev/GPU) or "onnx" (lightweight CPU deploy)
+HF_MODEL_REPO = os.getenv("ML_HF_MODEL_REPO", "")  # e.g. "Karn81/PotholeNet-YOLO11n"
+HF_MODEL_FILE = os.getenv("ML_HF_MODEL_FILE", "best.pt" if BACKEND == "torch" else "best.onnx")
 MODEL_PATH = os.getenv("ML_MODEL_PATH", "models/potholenet_best.pt")
 CONFIDENCE_THRESHOLD = float(os.getenv("ML_CONFIDENCE_THRESHOLD", "0.35"))
 MAX_IMAGE_SIZE_MB = float(os.getenv("ML_MAX_IMAGE_SIZE_MB", "10"))
@@ -36,16 +37,13 @@ logging.basicConfig(level=LOG_LEVEL, format="%(asctime)s %(levelname)s [%(name)s
 logger = logging.getLogger("potholenet-ml")
 
 # Mutable app-state container populated at startup
-model_state = {"model": None, "loaded": False, "load_error": None, "version": None}
+model_state = {"model": None, "loaded": False, "load_error": None, "version": None, "backend": None}
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    from ultralytics import YOLO
     try:
         if HF_MODEL_REPO:
-            # Pull from Hugging Face Hub — this is how weights reach a fresh deploy
-            # (e.g. HF Spaces, Cloud Run, Render) without committing .pt files to git.
             weights_path = Path(hf_hub_download(HF_MODEL_REPO, HF_MODEL_FILE))
             logger.info(f"Downloaded weights from HF Hub: {HF_MODEL_REPO}/{HF_MODEL_FILE}")
         else:
@@ -55,10 +53,32 @@ async def lifespan(app: FastAPI):
                     f"model weights not found at {weights_path}, and ML_HF_MODEL_REPO "
                     f"is not set — nothing to download either"
                 )
-        model_state["model"] = YOLO(str(weights_path))
+
+        if BACKEND == "onnx":
+            from .inference_onnx import ONNXPotholeDetector
+            model_state["model"] = ONNXPotholeDetector(str(weights_path))
+            # warm-up call — first ONNX Runtime inference on a fresh session pays a
+            # graph-optimization cost, same idea as CUDA's first-call cost on torch
+            import numpy as np
+            dummy = np.zeros((640, 640, 3), dtype=np.uint8)
+            dummy_path = Path("/tmp/_potholenet_warmup.jpg")
+            import cv2
+            cv2.imwrite(str(dummy_path), dummy)
+            model_state["model"].predict(str(dummy_path), conf_threshold=0.99)
+            dummy_path.unlink(missing_ok=True)
+        else:
+            from ultralytics import YOLO
+            model_state["model"] = YOLO(str(weights_path))
+            # warm-up call — first CUDA forward pass pays a context-init/autotune
+            # cost (seconds); pay it here, not on the first real user's request
+            import numpy as np
+            dummy = np.zeros((640, 640, 3), dtype=np.uint8)
+            model_state["model"].predict(dummy, conf=0.99, verbose=False)
+
+        model_state["backend"] = BACKEND
         model_state["loaded"] = True
         model_state["version"] = weights_path.stem
-        logger.info(f"Model loaded from {weights_path}")
+        logger.info(f"Model loaded from {weights_path} (backend={BACKEND})")
     except Exception as exc:  # noqa: BLE001 — surface any load failure via /health
         model_state["loaded"] = False
         model_state["load_error"] = str(exc)
@@ -147,9 +167,17 @@ async def predict(file: UploadFile = File(...)):
             raise HTTPException(status_code=400, detail="file is not a valid image")
 
         t0 = time.perf_counter()
-        results = model_state["model"].predict(
-            str(tmp_path), conf=CONFIDENCE_THRESHOLD, verbose=False
-        )[0]
+        if model_state["backend"] == "onnx":
+            onnx_dets = model_state["model"].predict(str(tmp_path), conf_threshold=CONFIDENCE_THRESHOLD)
+            raw_boxes = [(d.class_id, round(d.confidence, 4), [d.x1, d.y1, d.x2, d.y2]) for d in onnx_dets]
+        else:
+            results = model_state["model"].predict(
+                str(tmp_path), conf=CONFIDENCE_THRESHOLD, verbose=False
+            )[0]
+            raw_boxes = [
+                (int(box.cls[0]), round(float(box.conf[0]), 4), [float(v) for v in box.xyxy[0]])
+                for box in results.boxes
+            ]
         elapsed_ms = (time.perf_counter() - t0) * 1000
 
         if elapsed_ms > TIMEOUT_MS:
@@ -158,10 +186,6 @@ async def predict(file: UploadFile = File(...)):
 
         img_w, img_h = Image.open(tmp_path).size
 
-        raw_boxes = [
-            (int(box.cls[0]), round(float(box.conf[0]), 4), [float(v) for v in box.xyxy[0]])
-            for box in results.boxes
-        ]
         severity_inputs = [
             SeverityInput(x1=b[0], y1=b[1], x2=b[2], y2=b[3], confidence=conf)
             for _, conf, b in raw_boxes

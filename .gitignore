@@ -24,3 +24,4 @@ validation*.txt
 
 # Backups / archives
 *.zip
+prediction_review/
