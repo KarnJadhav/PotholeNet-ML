@@ -52,6 +52,13 @@ def main():
                           "CURRENT total positive images, to avoid tanking recall. "
                           "0.20 = negatives capped at 20%% of current dataset size.")
     ap.add_argument("--dry-run", action="store_true")
+    ap.add_argument("--independent", action="store_true",
+                     help="treat every image as its own group instead of using the filename-prefix "
+                          "sequence heuristic. Use this for pre-shuffled research datasets (like "
+                          "Attain) where images are independent stills, not consecutive video frames "
+                          "— the sequence heuristic can badly misfire on such data (e.g. collapsing "
+                          "an entire sub-dataset into one giant 'sequence' if filenames only vary by "
+                          "a trailing number), dumping everything into a single split.")
     args = ap.parse_args()
 
     new_images = [p for p in args.source.iterdir() if p.suffix.lower() in VALID_EXTS]
@@ -74,11 +81,13 @@ def main():
     ratio = current_split_ratio(args.dataset)
     print(f"Current split ratio: {ratio}")
 
-    # group by filename-prefix sequence heuristic (same as prepare_dataset.py default)
     groups = defaultdict(list)
     for img_path in new_images:
-        seq_id = img_path.stem.rsplit("_", 1)[0]
-        groups[f"bg_{seq_id}"].append(img_path)
+        if args.independent:
+            seq_id = f"bg_{img_path.stem}"
+        else:
+            seq_id = f"bg_{img_path.stem.rsplit('_', 1)[0]}"
+        groups[seq_id].append(img_path)
 
     seq_ids = list(groups.keys())
     random.Random(args.seed).shuffle(seq_ids)
@@ -111,7 +120,7 @@ def main():
                 print(f"WOULD ADD [{split}] {img_path.name} -> {dest_name} (empty label)")
             else:
                 shutil.copy2(img_path, img_dest)
-                lbl_dest.write_text("")  # empty label file = background image, YOLO convention
+                lbl_dest.write_text("")
 
     print(f"\n{'DRY RUN — nothing written' if args.dry_run else 'Added'}:")
     for split in SPLITS:

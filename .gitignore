@@ -25,3 +25,4 @@ validation*.txt
 # Backups / archives
 *.zip
 prediction_review/
+scripts/attain_negatives/
