@@ -1,0 +1,52 @@
+name: Deployment Status
+
+# Render auto-deploys on push via its own webhook — this workflow does not
+# trigger the deploy. It runs alongside it and records a GitHub Deployment
+# (visible under the repo's "Deployments" tab / "Environments") by polling
+# the live health endpoint until the service responds healthy.
+#
+# Caveat: /health does not currently return a commit SHA, so this confirms
+# the service is reachable and healthy — not that THIS push is the version
+# live yet. If Render's build is still in progress when polling starts, an
+# old-but-healthy response could pass early. The sleep buffer below reduces
+# that risk but doesn't eliminate it. For a hard guarantee, add a
+# `commit_sha` field to /health and compare it against `github.sha` here.
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  deployments: write
+
+jobs:
+  record-deployment:
+    runs-on: ubuntu-latest
+    environment:
+      name: production
+      url: https://potholenet-ml.onrender.com
+    steps:
+      - name: Give Render a head start on the build
+        run: sleep 60
+
+      - name: Poll health endpoint until healthy (or time out)
+        run: |
+          URL="https://potholenet-ml.onrender.com/health"
+          MAX_ATTEMPTS=30
+          SLEEP_SECONDS=20
+
+          for i in $(seq 1 "$MAX_ATTEMPTS"); do
+            HTTP_CODE=$(curl -s -o /tmp/health.json -w "%{http_code}" "$URL" || echo "000")
+
+            if [ "$HTTP_CODE" = "200" ] && grep -q '"model_loaded":true' /tmp/health.json; then
+              echo "Healthy after $i attempt(s):"
+              cat /tmp/health.json
+              exit 0
+            fi
+
+            echo "Attempt $i/$MAX_ATTEMPTS: not healthy yet (HTTP $HTTP_CODE), retrying in ${SLEEP_SECONDS}s..."
+            sleep "$SLEEP_SECONDS"
+          done
+
+          echo "Timed out waiting for a healthy response from $URL"
+          exit 1
