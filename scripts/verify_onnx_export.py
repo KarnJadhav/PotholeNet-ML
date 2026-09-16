@@ -10,8 +10,7 @@ own model.predict() defaults to IoU 0.7 if not passed explicitly, while
 inference_onnx.py's ONNXPotholeDetector defaults to IoU 0.45 (the value
 actually used in production, via app/main.py). Comparing PyTorch-at-0.7
 against ONNX-at-0.45 produces a false "mismatch" — different NMS strictness,
-not a decode bug — which is exactly what happened before this default was
-pinned down explicitly here.
+not a decode bug.
 
 Usage:
   python verify_onnx_export.py \
@@ -72,17 +71,21 @@ def main():
     onnx_sorted = sorted(onnx_boxes, key=lambda x: -x[0])
 
     max_box_diff = 0.0
+    max_relative_diff = 0.0
     max_conf_diff = 0.0
     for (pc, px1, py1, px2, py2), (oc, ox1, oy1, ox2, oy2) in zip(pt_sorted, onnx_sorted):
         conf_diff = abs(pc - oc)
         box_diff = max(abs(px1 - ox1), abs(py1 - oy1), abs(px2 - ox2), abs(py2 - oy2))
+        box_w, box_h = max(px2 - px1, 1.0), max(py2 - py1, 1.0)
+        relative_diff = box_diff / min(box_w, box_h)
         max_conf_diff = max(max_conf_diff, conf_diff)
         max_box_diff = max(max_box_diff, box_diff)
+        max_relative_diff = max(max_relative_diff, relative_diff)
 
     print(f"\nMax confidence difference: {max_conf_diff:.4f}")
-    print(f"Max bbox coordinate difference: {max_box_diff:.2f} px")
+    print(f"Max bbox coordinate difference: {max_box_diff:.2f} px ({max_relative_diff*100:.2f}% of box size)")
 
-    if max_box_diff > 5.0 or max_conf_diff > 0.05:
+    if max_relative_diff > 0.03 or max_conf_diff > 0.05:
         print("\n⚠ Differences larger than expected floating-point/export noise.")
         print("Do not trust the ONNX path for deployment until this is resolved —")
         print("check the letterbox math and output-tensor layout assumptions in inference_onnx.py.")
