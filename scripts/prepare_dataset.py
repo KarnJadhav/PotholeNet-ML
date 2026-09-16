@@ -81,10 +81,18 @@ def voc_to_yolo_boxes(xml_path: Path):
     return lines
 
 
-def collect_rdd2022(images_dir: Path, annots_dir: Path, source_tag: str):
-    """Returns list of (image_path, yolo_lines, sequence_id)."""
+def collect_rdd2022(images_dir: Path, annots_dir: Path, source_tag: str,
+                     keep_negatives_frac: float = 0.0, seed: int = 42):
+    """Returns list of (image_path, yolo_lines, sequence_id).
+    RDD2022 images with no D40 box are real negatives for a single-class pothole
+    detector (they may have OTHER damage classes, or be clean road) — by default
+    these were dropped entirely, which throws away free background examples.
+    keep_negatives_frac (0.0-1.0) controls what fraction of no-D40 images to keep
+    as background (empty label file) rather than discard. Don't set this to 1.0
+    blindly — too many negatives relative to positives can hurt recall; something
+    in the 0.1-0.2 range (10-20% of your final positive count) is a reasonable start."""
     items = []
-    skipped_no_d40 = 0
+    negative_candidates = []
     for img_path in sorted(images_dir.iterdir()):
         if img_path.suffix.lower() not in IMG_EXTS:
             continue
@@ -92,13 +100,23 @@ def collect_rdd2022(images_dir: Path, annots_dir: Path, source_tag: str):
         if not xml_path.exists():
             continue
         lines = voc_to_yolo_boxes(xml_path)
-        if not lines:
-            skipped_no_d40 += 1
-            continue  # image has no D40 (pothole) instance — drop rather than keep as empty background
         seq_id = f"{source_tag}_{img_path.stem.rsplit('_', 1)[0]}"
+        if not lines:
+            negative_candidates.append((img_path, [], seq_id))
+            continue
         items.append((img_path, lines, seq_id))
-    print(f"[RDD2022] kept {len(items)} images with D40 boxes, "
-          f"skipped {skipped_no_d40} with no pothole instance")
+
+    n_keep = int(len(negative_candidates) * keep_negatives_frac)
+    kept_negatives = []
+    if n_keep > 0:
+        random.Random(seed).shuffle(negative_candidates)
+        kept_negatives = negative_candidates[:n_keep]
+        items.extend(kept_negatives)
+
+    print(f"[RDD2022] kept {len(items) - len(kept_negatives)} images with D40 boxes, "
+          f"{len(negative_candidates)} had no pothole instance, "
+          f"kept {len(kept_negatives)} of those as background examples "
+          f"(keep_negatives_frac={keep_negatives_frac})")
     return items
 
 
@@ -280,13 +298,18 @@ def main():
     ap.add_argument("--train-frac", type=float, default=0.70)
     ap.add_argument("--val-frac", type=float, default=0.20)
     ap.add_argument("--seed", type=int, default=42)
+    ap.add_argument("--rdd-keep-negatives-frac", type=float, default=0.0,
+                     help="fraction (0-1) of RDD2022 no-D40 images to keep as background "
+                          "examples instead of discarding. Start around 0.1-0.2 of your "
+                          "positive count, not 1.0 — too many negatives can hurt recall.")
     args = ap.parse_args()
 
     manifest = load_sequence_manifest(args.sequence_manifest)
     all_items = []
 
     if args.rdd2022_images and args.rdd2022_annots:
-        all_items += collect_rdd2022(args.rdd2022_images, args.rdd2022_annots, "rdd2022")
+        all_items += collect_rdd2022(args.rdd2022_images, args.rdd2022_annots, "rdd2022",
+                                      keep_negatives_frac=args.rdd_keep_negatives_frac, seed=args.seed)
     if args.pothole600_images and args.pothole600_labels:
         all_items += collect_yolo_source(args.pothole600_images, args.pothole600_labels,
                                           "pothole600", manifest)

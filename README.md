@@ -1,296 +1,190 @@
 # PotholeNet-ML
 
-An ML microservice for detecting potholes in road images using a fine-tuned YOLO11 object detector, with a separate rule-based severity estimation module and a FastAPI inference service.
+A fine-tuned YOLO11 pothole detection microservice with a decoupled rule-based severity estimator, served via FastAPI and designed to sit behind a Node.js backend.
 
-The service is designed to be called by a Node.js backend rather than directly by the frontend.
-
----
-
-## 1. Project Status
-
-### Current status
-
-* ✅ YOLO11 fine-tuning pipeline
-* ✅ Dataset preparation/normalization pipeline
-* ✅ Dataset validation and leakage checks
-* ✅ Annotation visualization
-* ✅ Evaluation pipeline
-* ✅ CLI inference
-* ✅ FastAPI inference service
-* ✅ Node.js integration example
-* ✅ Separate severity-estimation module
-* ⚠️ Dataset validation currently reports errors that must be fixed
-* ⏳ First detector training run
-* ⏳ Production rate limiting
-* ⏳ Hard inference-timeout enforcement
-
-### Current dataset validation result
-
-The current dataset contains approximately **2,642 images**, but the validator currently reports:
-
-```text
-Errors:   504
-Warnings: 1338
-```
-
-**Training must not begin until all validation errors are resolved.**
-
-Warnings such as very small bounding boxes do not automatically mean the annotations are invalid. They require visual inspection.
+[![Status](https://img.shields.io/badge/status-baseline%20trained-yellow)]()
+[![Model](https://img.shields.io/badge/model-YOLO11n-blue)]()
+[![Python](https://img.shields.io/badge/python-3.11-blue)]()
 
 ---
 
-# 2. Architecture
+## Table of Contents
 
-```text
-                         ┌─────────────────────┐
-                         │      Frontend       │
-                         │  Web / Mobile App   │
-                         └──────────┬──────────┘
-                                    │
-                                    ▼
-                         ┌─────────────────────┐
-                         │    Node.js Backend  │
-                         │                     │
-                         │ Auth / API / Upload │
-                         └──────────┬──────────┘
-                                    │
-                             HTTP / multipart
-                                    │
-                                    ▼
-                    ┌──────────────────────────────┐
-                    │       PotholeNet-ML          │
-                    │        FastAPI Service       │
-                    │                              │
-                    │  POST /predict               │
-                    │       │                      │
-                    │       ▼                      │
-                    │   YOLO11 Detector            │
-                    │       │                      │
-                    │       ▼                      │
-                    │   Pothole Detections         │
-                    │       │                      │
-                    │       ▼                      │
-                    │   Severity Estimator          │
-                    └──────────────┬───────────────┘
-                                   │
-                                   ▼
-                            Detection JSON
-```
-
-The frontend should **not call the ML service directly**.
-
-The Node.js backend acts as the application-facing API and communicates with the ML service internally.
+- [Project Status](#project-status)
+- [Architecture](#architecture)
+- [Repository Layout](#repository-layout)
+- [Environment Setup](#environment-setup)
+- [Dataset](#dataset)
+  - [Sources](#sources)
+  - [Preparation Pipeline](#preparation-pipeline)
+  - [Validation Gate](#validation-gate)
+  - [Known Dataset Limitations](#known-dataset-limitations)
+- [Training](#training)
+- [Evaluation](#evaluation)
+- [Baseline Results](#baseline-results)
+- [Error Analysis Workflow](#error-analysis-workflow)
+- [Severity Estimation](#severity-estimation)
+- [FastAPI Service](#fastapi-service)
+- [Node.js Integration](#nodejs-integration)
+- [Configuration Reference](#configuration-reference)
+- [Production Readiness](#production-readiness)
+- [Design Principles](#design-principles)
+- [Roadmap](#roadmap)
+- [Contributing / Reproducing](#contributing--reproducing)
 
 ---
 
-# 3. System Environment
+## Project Status
 
-Current development environment:
+| Component | Status |
+|---|---|
+| Dataset merge pipeline (`prepare_dataset.py`) | ✅ Built, source-tagged + content-deduped before split |
+| Dataset validation (`validate_dataset.py`) | ✅ Passing — 0 errors |
+| Duplicate/leakage remediation (`dedupe_dataset.py`, `inspect_dedupe_clusters.py`) | ✅ Built and used to fix a real cross-split leakage bug (see [Known Dataset Limitations](#known-dataset-limitations)) |
+| Annotation visual QC (`visualize_annotations.py`) | ✅ Used before training |
+| YOLO11n baseline training | ✅ Complete — see [Baseline Results](#baseline-results) |
+| YOLO11s / YOLO11m comparison | ⏳ Not yet run |
+| Manual false-positive / false-negative review | 🔶 In progress (`compare_predictions.py`) |
+| Test-set evaluation (one-time, post-decision) | ⏳ Not yet run — still iterating on val |
+| FastAPI service (`/predict`, `/health`) | ✅ Built, model loads once at startup |
+| Severity module | ✅ Built, rule-based, thresholds are placeholders |
+| Node.js integration | ✅ Example route provided, not yet wired into a production backend |
+| Rate limiting | ❌ Not implemented |
+| Hard inference timeout | ❌ Logged only, not enforced |
 
-```text
-Host OS:       Windows 11
-Runtime:       WSL2
-Linux:         Ubuntu 24.04.4 LTS
-Architecture:  x86_64 / AMD64
-
-Python:        3.11.16
-Conda:         25.11.1
-
-GPU:           NVIDIA GeForce RTX 5060
-VRAM:          8 GB
-
-PyTorch:       2.11.0+cu128
-CUDA:          12.8
-Ultralytics:   8.3.0
-```
-
-Architecture:
-
-```text
-Windows 11
-    ↓
-WSL2
-    ↓
-Ubuntu 24.04
-    ↓
-Conda / Python 3.11
-    ↓
-PyTorch + CUDA
-    ↓
-NVIDIA RTX 5060 8 GB
-```
-
-Verify the architecture:
-
-```bash
-uname -m
-```
-
-Expected:
-
-```text
-x86_64
-```
-
-Verify the GPU:
-
-```bash
-nvidia-smi
-```
-
-Verify PyTorch CUDA:
-
-```bash
-python -c "import torch; print(torch.__version__); print(torch.cuda.is_available()); print(torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'CPU')"
-```
+**Current baseline: YOLO11n, val mAP50 = 0.771, mAP50-95 = 0.544.** See [Baseline Results](#baseline-results) for the full breakdown and what's still unverified.
 
 ---
 
-# 4. Project Structure
+## Architecture
 
-```text
+```
+                     ┌──────────────────┐
+                     │     Frontend     │
+                     └────────┬─────────┘
+                              │
+                              ▼
+                     ┌──────────────────┐
+                     │  Node.js Backend │
+                     │  auth / upload   │
+                     │  rate limiting   │
+                     └────────┬─────────┘
+                              │ HTTP / multipart
+                              ▼
+                ┌────────────────────────────┐
+                │      PotholeNet-ML          │
+                │      FastAPI Service        │
+                │                              │
+                │  POST /predict               │
+                │       │                       │
+                │       ▼                       │
+                │  YOLO11 Detector              │
+                │       │                       │
+                │       ▼                       │
+                │  Severity Estimator           │
+                │  (separate, rule-based)       │
+                └──────────────┬───────────────┘
+                               │
+                               ▼
+                        Detection JSON
+```
+
+The frontend never calls the ML service directly — the Node backend is the only intended caller. This keeps model versioning, auth, and rate limiting out of the ML service's concerns.
+
+---
+
+## Repository Layout
+
+```
 PotholeNet-ML/
-│
-├── .claude/
-│   └── settings.json
-│
-├── backend-integration-example.js
-│
+├── backend-integration-example.js   # Express route: POST /api/detection/image
 └── ml-service/
-    │
     ├── .env.example
+    ├── .gitignore                   # dataset images/labels, weights, review dirs excluded
     ├── requirements.txt
     ├── README.md
     │
     ├── app/
     │   ├── __init__.py
-    │   ├── main.py
-    │   └── severity.py
+    │   ├── main.py                  # FastAPI: /predict, /health
+    │   └── severity.py              # rule-based severity estimator (decoupled)
     │
-    ├── datasets/
-    │   └── potholes/
-    │       ├── data.yaml
-    │       ├── images/
-    │       │   ├── train/
-    │       │   ├── val/
-    │       │   └── test/
-    │       │
-    │       └── labels/
-    │           ├── train/
-    │           ├── val/
-    │           └── test/
+    ├── datasets/potholes/
+    │   ├── data.yaml
+    │   ├── images/{train,val,test}/ # not tracked in git — see .gitignore
+    │   └── labels/{train,val,test}/ # not tracked in git — see .gitignore
     │
-    ├── models/
-    │   └── potholenet_best.pt
-    │
-    ├── runs/
-    │   └── ...
+    ├── models/                      # deployment copy of best.pt goes here
+    ├── runs/                        # training run outputs — not tracked in git
     │
     └── scripts/
-        ├── prepare_dataset.py
-        ├── validate_dataset.py
-        ├── visualize_annotations.py
-        ├── train.py
-        ├── evaluate.py
-        └── inference.py
+        ├── prepare_dataset.py       # merge RDD2022 + Pothole-600 + custom → YOLO format
+        ├── validate_dataset.py      # hard QC gate
+        ├── dedupe_dataset.py        # fix duplicate/leakage found by validator
+        ├── inspect_dedupe_clusters.py  # visual sanity-check before deleting anything
+        ├── dataset_stats.py         # per-split counts, bbox stats, resolutions
+        ├── visualize_annotations.py # render GT boxes for manual QC
+        ├── train.py                 # fine-tune YOLO11n/s/m, logs full repro metadata
+        ├── evaluate.py              # precision/recall/mAP/latency on val or test
+        ├── inference.py             # CLI single-image / directory inference
+        └── compare_predictions.py   # GT vs. prediction overlay for FP/FN review
+```
+
+Weight files (`*.pt`), the dataset's actual images/labels, and generated review folders (`qc_preview/`, `dedupe_review/`, `prediction_review/`, `runs/`) are gitignored. This repo tracks code and configuration, not binaries — reproduce the dataset and model locally using the scripts below.
+
+---
+
+## Environment Setup
+
+Development environment this project was built and trained on:
+
+```
+Host OS:      Windows 11
+Runtime:      WSL2, Ubuntu 24.04.4 LTS
+Python:       3.11.16 (conda env `potholenet`)
+GPU:          NVIDIA GeForce RTX 5060, 8 GB VRAM
+PyTorch:      2.11.0+cu128
+Ultralytics:  8.3.0
+```
+
+**GPU note:** RTX 50-series (Blackwell, `sm_120`) requires a PyTorch build with CUDA 12.8 (`cu128`) support. A `cu121`-era install will detect the GPU but is not actually compatible and will warn or fail — verify with:
+
+```bash
+python -c "import torch; print(torch.__version__, torch.cuda.is_available(), torch.cuda.get_device_name(0))"
+```
+
+Expected output should show a `+cu128` (or newer) build.
+
+### Install
+
+```bash
+cd ml-service
+conda create -n potholenet python=3.11
+conda activate potholenet
+python -m pip install -r requirements.txt
+```
+
+If installing PyTorch separately for a specific CUDA version:
+
+```bash
+pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu128
 ```
 
 ---
 
-# 5. ML Approach
+## Dataset
 
-PotholeNet uses a **single-class object detector**.
+### Sources
 
-```text
-Class 0 = pothole
-```
+| Source | Notes |
+|---|---|
+| **RDD2022** | Road Damage Dataset. Only the `D40` (pothole) class is extracted; other damage classes are dropped. Annotations converted from Pascal VOC/XML to YOLO format. |
+| **Pothole-600** | ~600 images with Asian/Indian-relevant road scenes. Verify license before redistribution. |
+| **Custom Indian-road images** | Collected separately — dashcam, smartphone, field images. Intended to cover daylight/low-light, wet roads, shadows, multiple/partial potholes, varied camera heights. |
 
-The detector is based on a pretrained YOLO11 model.
+Before merging any source: check its license, verify class definitions, and check for duplicates against the other sources — see [Known Dataset Limitations](#known-dataset-limitations) for what happens when this step is skipped.
 
-Initial model candidates:
-
-```text
-YOLO11n
-YOLO11s
-YOLO11m
-```
-
-The current hardware target is:
-
-```text
-NVIDIA RTX 5060
-8 GB VRAM
-```
-
-The project uses **fine-tuning only**.
-
-It does **not** train YOLO from scratch.
-
----
-
-# 6. Dataset Sources
-
-The intended dataset combines three sources:
-
-### 6.1 RDD2022
-
-Use the relevant pothole/road-damage class:
-
-```text
-D40
-```
-
-RDD2022 annotations are converted from Pascal VOC/XML to YOLO format.
-
-Only the required pothole class is retained.
-
----
-
-### 6.2 Pothole-600
-
-Pothole-600 provides additional pothole examples, including road scenes relevant to Asian/Indian environments.
-
-Before using it:
-
-* verify the license
-* preserve source provenance
-* check for duplicate images
-* normalize annotations to YOLO format
-* force the pothole class to class `0`
-
----
-
-### 6.3 Custom Indian Road Dataset
-
-Custom Indian-road images should be collected and labeled separately.
-
-Recommended sources include:
-
-* dashcam footage
-* smartphone road images
-* manually collected field images
-* representative Indian road conditions
-
-Custom images should contain realistic variation:
-
-* daylight
-* cloudy weather
-* shadows
-* wet roads
-* different road surfaces
-* urban roads
-* rural roads
-* highways
-* different camera heights
-* near and far potholes
-* multiple potholes
-* partially visible potholes
-
----
-
-# 7. Dataset Preparation
-
-The dataset preparation script combines the three sources.
+### Preparation Pipeline
 
 ```bash
 python scripts/prepare_dataset.py \
@@ -303,1010 +197,327 @@ python scripts/prepare_dataset.py \
   --out datasets/potholes
 ```
 
-The resulting structure should be:
+This script:
+- Converts RDD2022 VOC XML → YOLO format, keeping only `D40` boxes
+- Forces all source class IDs to `0` (single-class detector)
+- Runs a **content-based dedup pass before splitting** (md5 exact-match + phash near-duplicate clustering) — this exists specifically because merging multiple public pothole datasets tends to pull in the same underlying images under different filenames/formats
+- Groups images by sequence ID so a video/burst never splits across train/val/test
+- Writes into `datasets/potholes/images|labels/<split>/` with source-tagged filenames
 
-```text
-datasets/potholes/
-│
-├── data.yaml
-│
-├── images/
-│   ├── train/
-│   ├── val/
-│   └── test/
-│
-└── labels/
-    ├── train/
-    ├── val/
-    └── test/
-```
+### Validation Gate
 
----
-
-# 8. Dataset Splitting
-
-The dataset should be split approximately:
-
-```text
-Train: 70%
-Validation: 20%
-Test: 10%
-```
-
-The important requirement is that the split is **sequence-aware**.
-
-Adjacent frames from the same video/burst must never be distributed across train, validation and test.
-
-Bad:
-
-```text
-video_001_frame_001 → train
-video_001_frame_002 → val
-video_001_frame_003 → test
-```
-
-Good:
-
-```text
-video_001 → train
-video_002 → validation
-video_003 → test
-```
-
-This prevents data leakage and gives a more realistic estimate of generalization.
-
----
-
-# 9. Dataset Validation
-
-Dataset validation is a mandatory gate before training.
-
-Run:
+**Mandatory before every training run:**
 
 ```bash
 python scripts/validate_dataset.py --dataset datasets/potholes
 ```
 
-The validator checks:
+Checks: image/label pairing, invalid class IDs, malformed rows, out-of-bounds bboxes, empty label files, exact duplicates (within-split), and cross-split near-duplicate leakage (perceptual hash).
 
-* image/label pairing
-* missing labels
-* missing images
-* invalid class IDs
-* malformed annotation rows
-* bounding-box coordinates
-* out-of-bounds coordinates
-* empty label files
-* extremely small bounding boxes
-* exact duplicate images
-* near-duplicate images
-* cross-split leakage
-
----
-
-# 10. Current Validation Problem
-
-The current dataset validation result is:
-
-```text
-Errors:   504
-Warnings: 1338
-```
-
-Example warnings:
-
-```text
-very small bbox
-area frac=0.00028
-53x14px
-```
-
-Small bounding boxes are **warnings**, not automatically invalid annotations.
-
-A small pothole can be legitimate when it is far away from the camera.
-
-However, each warning should be visually inspected.
-
-The critical issue is the:
-
-```text
-504 ERRORS
-```
-
-Training should not start until these are understood and fixed.
-
----
-
-# 11. Investigating Validation Errors
-
-Save the complete validation output:
+If it reports errors, save the output and investigate before fixing anything:
 
 ```bash
-python scripts/validate_dataset.py \
-  --dataset datasets/potholes 2>&1 | tee validation.txt
+python scripts/validate_dataset.py --dataset datasets/potholes > validation.txt 2>&1
+grep "^ERROR" validation.txt | cut -d' ' -f2 | sort | uniq -c
 ```
 
-Show only errors:
+**Do not blindly delete flagged images.** Near-duplicate (phash) flags in particular can be false positives — pothole photos naturally share asphalt texture and camera angle, which perceptual hashing can mistake for duplication. Use `inspect_dedupe_clusters.py` to visually confirm before deleting:
 
 ```bash
-grep '^ERROR' validation.txt
+python scripts/inspect_dedupe_clusters.py --dataset datasets/potholes --phash-thresh 6 --sample 15
 ```
 
-Summarize error types:
+This prints cluster-size distribution (large clusters suggest false-positive chaining, not real dupes) and writes side-by-side montage images to `dedupe_review/` for manual confirmation. Once confirmed, resolve:
 
 ```bash
-grep '^ERROR' validation.txt | \
-  cut -d: -f1-2 | \
-  sort | \
-  uniq -c | \
-  sort -nr
+# exact-only (safe, no false-positive risk) — removes byte-identical images,
+# and consolidates any that span multiple splits (real leakage)
+python scripts/dedupe_dataset.py --dataset datasets/potholes --exact-only --dry-run
+python scripts/dedupe_dataset.py --dataset datasets/potholes --exact-only
 ```
 
-Do **not** simply delete the affected annotations.
+### Known Dataset Limitations
 
-First determine whether the problem is:
+Documenting these honestly rather than hiding them:
 
-* bad source annotation
-* conversion bug
-* filename mismatch
-* class mapping problem
-* invalid YOLO coordinates
-* duplicate data
-* dataset split leakage
-* genuinely bad annotation
+1. **Split ratio drift.** After removing exact-duplicate/cross-split-leaked images, the split moved from the target 70/20/10 to roughly **56/27/16** (896 train / 435 val / 257 test). This happened because duplicate resolution prioritizes keeping test and val intact (they're smaller and more expensive to reconstruct correctly) and strips duplicates from train first. **Train is thinner than intended** — expanding it with genuinely new images (not more of the same duplicated sources) is a priority before the next training iteration.
 
-Fix the underlying problem and rerun validation.
+2. **Zero background (no-pothole) images.** Every image in the current dataset has at least one labeled pothole. The original spec called for negative examples — road patches, shadows, cracks, manholes that should *not* be classified as potholes — and there currently aren't any. This likely means false-positive rates on clean/ambiguous road surfaces are **untested**, not necessarily good.
 
-Target:
+3. **Resolution mismatch.** Source images range from ~140px to 2000px on a side, most well below the `imgsz=640` training resolution. Small source images get upsampled, which can blur exactly the fine detail needed for small/distant pothole detection. Combined with a meaningful number of already-small bounding boxes in the label set, small-object recall is a known risk area — see [Baseline Results](#baseline-results).
 
-```text
-Errors:   0
-```
-
-Warnings can remain only when they have been reviewed and determined to be legitimate.
+4. **Sequence metadata isn't recoverable for the currently merged dataset.** The images currently in `datasets/potholes/` were assembled from a pre-existing organized dump rather than run end-to-end through `prepare_dataset.py`, so filenames don't carry the sequence tags the split-leakage prevention relies on. Future additions to this dataset should go through `prepare_dataset.py` from raw sources so sequence-aware splitting applies correctly.
 
 ---
 
-# 12. Visual Annotation QC
+## Training
 
-After validation:
+Fine-tuning only — this project never trains a detector from scratch.
 
 ```bash
-python scripts/visualize_annotations.py \
-  --dataset datasets/potholes
+python scripts/train.py \
+  --model yolo11n.pt \
+  --data datasets/potholes/data.yaml \
+  --epochs 100 \
+  --imgsz 640 \
+  --batch 8 \
+  --name potholenet_yolo11n_v1
 ```
 
-Manually inspect the generated samples.
+- `--model` accepts `yolo11n.pt`, `yolo11s.pt`, or `yolo11m.pt` — pretrained weights download automatically via Ultralytics on first use.
+- `--batch 8` is a safe explicit starting point for an 8 GB card; Ultralytics auto-batch (`--batch -1`) is also available but a fixed value is more predictable on unfamiliar hardware.
+- YOLO11m is meaningfully heavier than n/s — don't assume it fits without monitoring VRAM.
 
-Check:
+**Reproducibility:** `train.py` writes a `run_metadata.json` alongside the weights, capturing dataset counts, hyperparameters, GPU, and package versions. It reads the actual save directory back from `model.trainer.save_dir` rather than assuming it matches `--name` — Ultralytics silently auto-increments the run folder (`_v1` → `_v13`, etc.) if a prior/interrupted run already used that name, and earlier versions of this script wrote metadata to the wrong (non-existent) path when that happened.
 
-* bounding box surrounds the pothole
-* box is not shifted
-* box is not excessively large
-* pothole is actually visible
-* annotation is not another road object
-* multiple potholes are correctly labeled
-* tiny objects are genuine potholes
-* no obvious labeling mistakes exist
+**Interrupted training:** Ultralytics only writes `weights/last.pt` after an epoch fully completes (train + validation). If training is interrupted before epoch 1 finishes, there is nothing to resume from — just restart. If a checkpoint exists:
 
-Automated validation cannot replace visual QC.
+```python
+from ultralytics import YOLO
+model = YOLO("runs/<run_name>/weights/last.pt")
+model.train(resume=True)
+```
 
 ---
 
-# 13. Dataset Quality Gate
-
-The required pipeline is:
-
-```text
-Raw datasets
-      ↓
-prepare_dataset.py
-      ↓
-validate_dataset.py
-      ↓
-0 validation errors
-      ↓
-visualize_annotations.py
-      ↓
-manual annotation QC
-      ↓
-TRAINING
-```
-
-Never skip the validation step.
-
----
-
-# 14. YOLO Dataset Configuration
-
-`data.yaml` should contain a single class:
-
-```yaml
-path: /path/to/datasets/potholes
-
-train: images/train
-val: images/val
-test: images/test
-
-names:
-  0: pothole
-```
-
-The actual `path` should be configured for the environment where training runs.
-
----
-
-# 15. Training
-
-Once the dataset passes validation and visual QC, start with a reproducible baseline.
-
-The training script uses pretrained YOLO11 weights.
-
-Example:
+## Evaluation
 
 ```bash
-python scripts/train.py
+# iterate against validation while tuning
+python scripts/evaluate.py --weights runs/<run_name>/weights/best.pt --data datasets/potholes/data.yaml --split val
+
+# ONE time, once val-based iteration is finished
+python scripts/evaluate.py --weights runs/<run_name>/weights/best.pt --data datasets/potholes/data.yaml --split test
 ```
 
-The training script should:
-
-* load pretrained weights
-* never train from scratch
-* record dataset statistics
-* record Python/package versions
-* record GPU information
-* record hyperparameters
-* record the training configuration
-* save model checkpoints
-* save reproducibility metadata
+Reports precision, recall, mAP50, mAP50-95, average inference latency, and FPS estimate. **mAP is not sufficient sign-off** — it does not tell you *where* the model fails. Manual review is required before treating a model as usable.
 
 ---
 
-# 16. RTX 5060 8 GB Considerations
+## Baseline Results
 
-The RTX 5060 has 8 GB VRAM.
+**YOLO11n, 100 epochs, imgsz=640, batch=8, RTX 5060 8GB, ~20 minutes wall-clock.**
 
-YOLO11m is more demanding than YOLO11n/s.
+| Metric | Validation |
+|---|---|
+| Precision | 0.767 |
+| Recall | 0.682 |
+| mAP50 | 0.771 |
+| mAP50-95 | 0.544 |
+| Avg. inference latency | ~45 ms |
+| FPS estimate | ~22 |
 
-Therefore, do not assume a large batch size will fit.
+`best.pt` was selected from an earlier epoch (val mAP50 peaked around epoch 60–82 at ~0.76) rather than epoch 100, where mAP50 had drifted slightly lower (~0.749) — Ultralytics' checkpoint selection handled this correctly.
 
-Recommended approach:
+**This number is not a deployment sign-off.** Per the [Known Dataset Limitations](#known-dataset-limitations) above — zero background images in training data — false-positive behavior on shadows, cracks, manholes, and puddles is not represented in this metric at all. Manual review via `compare_predictions.py` is in progress; see [Error Analysis Workflow](#error-analysis-workflow).
 
-```text
-1. Get dataset clean
-2. Start YOLO11m conservatively
-3. Monitor VRAM
-4. Reduce batch size if necessary
-5. Establish baseline
-6. Compare against YOLO11s/n
-```
-
-The first objective is not maximum performance.
-
-The first objective is a **reproducible baseline**.
+YOLO11s and YOLO11m comparisons have not yet been run on this dataset.
 
 ---
 
-# 17. Training Strategy
+## Error Analysis Workflow
 
-Recommended experiment sequence:
-
-```text
-Experiment 1
-YOLO11n
-↓
-baseline
-
-Experiment 2
-YOLO11s
-↓
-compare
-
-Experiment 3
-YOLO11m
-↓
-compare if VRAM/performance justify it
-```
-
-Compare:
-
-* precision
-* recall
-* mAP50
-* mAP50-95
-* inference latency
-* FPS
-* GPU memory
-* false positives
-* false negatives
-
-Choose the model based on the actual deployment requirement rather than model size alone.
-
----
-
-# 18. Evaluation
-
-After training:
+mAP alone doesn't tell you what's actually going wrong. After training:
 
 ```bash
-python scripts/evaluate.py
+python scripts/compare_predictions.py \
+  --weights runs/<run_name>/weights/best.pt \
+  --dataset datasets/potholes \
+  --split val \
+  --n 25 --conf 0.35
 ```
 
-Evaluate validation data first.
+This draws **ground truth in green, predictions in red** on the same image, and heuristically tags output filenames `_LIKELY_FN` (predicted fewer boxes than labeled — possible miss) or `_LIKELY_FP` (predicted more — possible false alarm) based on box count mismatch. Count mismatch is a rough proxy, not exact — a matched count can still hide a misplaced box — so open the images.
 
-Use the test set only after model/data decisions are finished.
+Pay particular attention to the failure modes called out in the original spec:
 
-Recommended workflow:
+- **False positives on:** road patches, shadows, manholes, cracks, puddles, vehicle shadows, pavement markings
+- **False negatives on:** small/distant potholes, partially occluded potholes, poor lighting, wet roads, unusual shapes
 
-```text
-Train
-  ↓
-Validation
-  ↓
-Error analysis
-  ↓
-Dataset/model improvements
-  ↓
-Final model
-  ↓
-Test evaluation
+Error-driven improvement loop:
+
+```
+inference.py on real field images
+        ↓
+collect FP / FN examples
+        ↓
+correct or add annotations
+        ↓
+re-run validate_dataset.py
+        ↓
+retrain
+        ↓
+re-evaluate on val (not test)
 ```
 
-Do not repeatedly tune against the test set.
+Never repeatedly evaluate against the test set during this loop — that reintroduces the same overfitting risk the sequence-aware split was designed to prevent, just at the model-selection level instead of the data level.
 
 ---
 
-# 19. Error Analysis
+## Severity Estimation
 
-After the first training run, inspect:
+`app/severity.py` is deliberately decoupled from the detector. The YOLO model answers "where is the pothole"; severity answers "how serious does it look" — and does so **without ever claiming to measure physical depth, diameter, or volume**, since a single uncalibrated RGB image and bounding box cannot support that claim.
 
-### False positives
+Inputs used:
+- Bounding-box area as a fraction of frame area
+- Number of potholes detected in the same frame
+- Vertical position in frame (weak proxy for proximity to camera)
 
-Examples where the detector incorrectly predicts:
-
-```text
-pothole
-```
-
-Possible causes:
-
-* road patches
-* shadows
-* manholes
-* cracks
-* puddles
-* debris
-* pavement markings
-
-### False negatives
-
-Actual potholes that were missed.
-
-Investigate whether they are:
-
-* very small
-* far away
-* partially occluded
-* poorly illuminated
-* unusual shapes
-* wet
-* severe but visually ambiguous
-
-Error analysis should drive the next dataset/training iteration.
-
----
-
-# 20. Inference
-
-Single image:
-
-```bash
-python scripts/inference.py \
-  --source /path/to/image.jpg
-```
-
-Directory:
-
-```bash
-python scripts/inference.py \
-  --source /path/to/images/
-```
-
-The detector outputs pothole detections with bounding boxes and confidence values.
-
----
-
-# 21. Severity Module
-
-Severity is intentionally separate from the detector.
-
-Current implementation is **rule-based**.
-
-It uses signals such as:
-
-* bounding-box area fraction
-* number of potholes in the frame
-* vertical position
-* weak proximity-related image cues
-
-It does **not** claim to measure:
-
-* physical pothole depth
-* actual diameter
-* real-world dimensions
-* road damage volume
-
-The output is explicitly an estimate.
-
-Example conceptual response:
+Output shape:
 
 ```json
 {
-  "severity": {
-    "label": "moderate",
-    "score": 0.64,
-    "estimate_only": true,
-    "reasons": [
-      "large detected pothole",
-      "multiple potholes detected"
-    ]
-  }
+  "label": "moderate",
+  "score": 0.41,
+  "reasons": [
+    "bbox covers 2.10% of frame area",
+    "positioned low in frame, likely closer to camera (+0.09)"
+  ],
+  "estimate_only": true,
+  "caveat": "Severity is a heuristic estimate ... not a physical measurement ..."
 }
 ```
 
-Current thresholds are placeholders.
-
-They should be recalibrated using real field data and human severity judgments.
+Thresholds (`AREA_FRAC_THRESHOLDS`, proximity/multi-pothole bonuses) are **placeholders** — they have not been calibrated against real field data or human severity judgments, and shouldn't be treated as tuned until that calibration happens. Doing that calibration now, before the detector itself has been through error-driven improvement, would mostly be guessing against a moving target.
 
 ---
 
-# 22. FastAPI Service
-
-Start the service:
+## FastAPI Service
 
 ```bash
+cp .env.example .env   # edit ML_MODEL_PATH etc.
+cp runs/<run_name>/weights/best.pt models/potholenet_best.pt
 uvicorn app.main:app --host 0.0.0.0 --port 8000
 ```
 
-The model is loaded once during application startup.
+The model loads once at startup via FastAPI's `lifespan` context — not per-request.
 
-It is not loaded for every request.
+### `GET /health`
 
----
-
-# 23. API Endpoints
-
-## Health
-
-```http
-GET /health
+```json
+{"status": "ok", "model_loaded": true, "model_version": "potholenet_best", "load_error": null}
 ```
 
-Used to determine whether the ML service is available and whether the model has loaded correctly.
+### `POST /predict` (multipart, field name `file`)
 
----
-
-## Prediction
-
-```http
-POST /predict
+```bash
+curl -X POST http://localhost:8000/predict -F "file=@road.jpg"
 ```
-
-Accepts an image upload.
-
-Conceptual response:
 
 ```json
 {
+  "success": true,
   "detections": [
     {
-      "bbox": [
-        100,
-        150,
-        400,
-        350
-      ],
-      "confidence": 0.91,
-      "class_id": 0,
-      "class_name": "pothole",
+      "class_id": 0, "class_name": "pothole", "confidence": 0.94,
+      "bbox": {"x1": 120, "y1": 80, "x2": 450, "y2": 310},
       "severity": {
-        "label": "moderate",
-        "score": 0.64,
-        "estimate_only": true
+        "label": "moderate", "score": 0.41,
+        "reasons": ["bbox covers 2.10% of frame area"],
+        "estimate_only": true,
+        "caveat": "Severity is a heuristic estimate ..."
       }
     }
   ],
-  "inference_time_ms": 18.4
+  "inference_time_ms": 42.1,
+  "model_version": "potholenet_best"
 }
 ```
 
----
-
-# 24. API Security
-
-Current service protections include:
-
-* image size limits
-* content/type validation
-* temporary-file cleanup
-* structured logging
-* health endpoint
-* model version reporting
-* CORS configuration
-* no filesystem-path leakage
-* no credential leakage
-
-Still required for production:
-
-```text
-❌ Rate limiting
-❌ Hard inference timeout
-```
-
-Rate limiting can be implemented with:
-
-```text
-slowapi
-```
-
-or enforced at the Node.js backend/API gateway.
+Uploaded files are written to `/tmp` for the duration of inference only and deleted immediately after (`finally: tmp_path.unlink()`), regardless of success or failure.
 
 ---
 
-# 25. Node.js Integration
+## Node.js Integration
 
-The intended architecture is:
-
-```text
-Client
-  ↓
-Node.js API
-  ↓
-POST /predict
-  ↓
-FastAPI ML Service
-  ↓
-YOLO11
-  ↓
-Detection + Severity
-  ↓
-Node.js
-  ↓
-Client
-```
-
-The provided:
-
-```text
-backend-integration-example.js
-```
-
-shows how the Node.js backend can forward an uploaded image to the ML service.
-
-The Node layer should handle:
-
-* authentication
-* authorization
-* rate limiting
-* request validation
-* ML service timeout
-* retry policy where appropriate
-* API response formatting
+`backend-integration-example.js` provides a drop-in Express route (`POST /api/detection/image`) that validates the upload, forwards it to the ML service, and handles the ML service's error states (503 model not loaded, 504 timeout, 502 unreachable). The frontend calls the Node backend; the Node backend calls the ML service. The frontend never calls the ML service directly.
 
 ---
 
-# 26. Environment Configuration
+## Configuration Reference
 
-Copy:
+`.env` (copy from `.env.example`):
 
-```bash
-cp .env.example .env
-```
+| Variable | Purpose | Default |
+|---|---|---|
+| `ML_MODEL_PATH` | Path to the deployed weights file | `models/potholenet_best.pt` |
+| `ML_CONFIDENCE_THRESHOLD` | Minimum confidence to report a detection | `0.35` |
+| `ML_MAX_IMAGE_SIZE_MB` | Reject uploads larger than this | `10` |
+| `ML_TIMEOUT_MS` | Logged if inference exceeds this — not yet a hard cutoff | `30000` |
+| `ML_ALLOWED_ORIGINS` | CORS allow-list | `http://localhost:5000` |
+| `ML_LOG_LEVEL` | Logging verbosity | `INFO` |
 
-Example:
-
-```env
-ML_MODEL_PATH=models/potholenet_best.pt
-ML_CONFIDENCE_THRESHOLD=0.35
-ML_MAX_IMAGE_SIZE_MB=10
-ML_TIMEOUT_MS=30000
-ML_ALLOWED_ORIGINS=http://localhost:5000
-```
-
-Do not commit secrets to Git.
+Never commit `.env` — only `.env.example` should be tracked.
 
 ---
 
-# 27. Dependency Installation
+## Production Readiness
 
-Create/activate the environment:
+### API service
 
-```bash
-conda activate potholenet
-```
+- [x] Request size limits, file type validation
+- [x] Model loaded once at startup, version reported in responses
+- [x] Structured logging, health check
+- [x] Temp file cleanup after every request (success or failure)
+- [x] CORS restricted to configured origins
+- [ ] **Rate limiting** — not implemented. Recommend `slowapi` in front of `/predict`, or enforce at the Node layer since it's the only allowed caller
+- [ ] **Hard inference timeout** — currently logged only (`ML_TIMEOUT_MS`), does not actually cancel a slow inference. Add `asyncio.wait_for` or a worker-based cutoff if this matters for your latency SLA
 
-Install the required packages:
+### Dataset
 
-```bash
-python -m pip install -r requirements.txt
-```
+- [x] Sources identified, provenance tracked via filename tagging
+- [x] Converted to unified YOLO format, single class
+- [x] Duplicate/leakage remediation completed for current merge
+- [ ] License verification for RDD2022 and Pothole-600 redistribution — confirm before any commercial deployment
+- [ ] Background/negative examples — currently absent, see [Known Dataset Limitations](#known-dataset-limitations)
+- [ ] Train set expansion — current 896 images is thin after dedup
 
-If individual dependencies are required:
+### Model
 
-```bash
-python -m pip install \
-  fastapi \
-  uvicorn \
-  pydantic \
-  python-multipart \
-  python-dotenv \
-  opencv-python-headless \
-  pillow \
-  numpy \
-  pandas \
-  imagehash
-```
+- [x] YOLO11n baseline trained and evaluated on validation
+- [ ] Manual FP/FN review completed and acted on
+- [ ] YOLO11s / YOLO11m comparison
+- [ ] Test-set evaluation (one-time, after the above)
+- [ ] Final model frozen for deployment
 
-Verify Ultralytics:
-
-```bash
-python -c "import ultralytics; print(ultralytics.__version__)"
-```
-
-Expected:
-
-```text
-8.3.0
-```
+**A model is not production-ready because training completed successfully.** Deployment should require: a clean `validate_dataset.py` pass, manual annotation review, a single clean test-set evaluation, manual false-positive/negative review, and inference checks against real Indian-road field images the model has not seen during training or validation.
 
 ---
 
-# 28. Complete Development Workflow
+## Design Principles
 
-The complete workflow is:
-
-```text
-                    RAW DATA
-                       │
-          ┌────────────┼────────────┐
-          │            │            │
-       RDD2022    Pothole-600   Indian shots
-          │            │            │
-          └────────────┼────────────┘
-                       ↓
-             prepare_dataset.py
-                       ↓
-              Normalized YOLO
-                       ↓
-             validate_dataset.py
-                       ↓
-                 0 ERRORS
-                       ↓
-          visualize_annotations.py
-                       ↓
-                Manual QC
-                       ↓
-                 YOLO11 baseline
-                       ↓
-                  evaluate.py
-                       ↓
-               Error analysis
-                       ↓
-             Dataset improvements
-                       ↓
-             YOLO11n/s/m comparison
-                       ↓
-              Select final detector
-                       ↓
-                 FastAPI service
-                       ↓
-                 Node.js backend
-                       ↓
-                  Application
-```
+- **Fine-tune, never train from scratch.** All training starts from pretrained YOLO11 weights.
+- **One detector class.** `0 = pothole`. Severity levels are not detector classes.
+- **Detection and severity are separate systems.** The detector answers "where"; severity answers "how bad, as an estimate." Neither should leak into the other's responsibility.
+- **Validate before training, every time.** A dataset with unresolved validation errors should never be used to train.
+- **Sequence-aware splitting.** Frame/video-derived data must group by source sequence when splitting, not by individual image.
+- **Test set stays untouched during iteration.** Only evaluated once, after model/dataset decisions are otherwise finalized.
+- **Every training run is reproducible.** Model, dataset counts, software versions, GPU, hyperparameters, and results are all recorded automatically.
 
 ---
 
-# 29. Current Immediate Task
+## Roadmap
 
-The current blocker is **dataset validation**.
-
-Current result:
-
-```text
-Errors:   504
-Warnings: 1338
-```
-
-Therefore:
-
-```text
-DO NOT TRAIN YET.
-```
-
-First save and inspect the errors:
-
-```bash
-python scripts/validate_dataset.py \
-  --dataset datasets/potholes 2>&1 | tee validation.txt
-```
-
-Then:
-
-```bash
-grep '^ERROR' validation.txt
-```
-
-Summarize them:
-
-```bash
-grep '^ERROR' validation.txt | \
-  cut -d: -f1-2 | \
-  sort | \
-  uniq -c | \
-  sort -nr
-```
-
-Fix the underlying dataset/conversion problems.
-
-Then rerun:
-
-```bash
-python scripts/validate_dataset.py \
-  --dataset datasets/potholes
-```
-
-Target:
-
-```text
-Errors:   0
-```
+1. Manual FP/FN review of the current baseline (`compare_predictions.py`) — in progress
+2. Expand train split with genuinely new (non-duplicate) Indian-road images
+3. Add background/negative examples (clean road, shadows, cracks, manholes) with no pothole label
+4. Re-run baseline training with expanded dataset
+5. Train and compare YOLO11s (and YOLO11m if VRAM/latency budget allows)
+6. One-time test-set evaluation on the selected model
+7. Calibrate severity thresholds against real field data once detector quality is settled
+8. Implement rate limiting and hard inference timeout
+9. Wire into production Node.js backend with auth/authorization
 
 ---
 
-# 30. Recommended Next Milestones
+## Contributing / Reproducing
 
-### Milestone 1 — Dataset
+This repo intentionally does not track dataset images/labels or trained weights (see `.gitignore`). To reproduce:
 
-```text
-RDD2022
-+
-Pothole-600
-+
-Indian custom data
-        ↓
-prepare_dataset.py
-        ↓
-0 validation errors
-```
+1. Obtain RDD2022 and Pothole-600 yourself, verify their licenses for your use case
+2. Collect and label your own Indian-road images
+3. Run `prepare_dataset.py` → `validate_dataset.py` → fix any errors → `visualize_annotations.py`
+4. Run `train.py`, then `evaluate.py`, then `compare_predictions.py` for manual review
+5. Iterate per [Error Analysis Workflow](#error-analysis-workflow) before considering deployment
 
-### Milestone 2 — Visual QC
-
-```text
-visualize_annotations.py
-        ↓
-manual inspection
-        ↓
-correct labels
-```
-
-### Milestone 3 — Baseline
-
-```text
-YOLO11n
-        ↓
-train
-        ↓
-evaluate
-```
-
-### Milestone 4 — Model Comparison
-
-```text
-YOLO11n
-   vs
-YOLO11s
-   vs
-YOLO11m
-```
-
-Compare accuracy, latency and VRAM.
-
-### Milestone 5 — Error Analysis
-
-Identify:
-
-```text
-false positives
-false negatives
-small-object failures
-difficult lighting
-road-surface confusion
-```
-
-### Milestone 6 — Production
-
-Complete:
-
-```text
-rate limiting
-hard inference timeout
-logging/monitoring
-model versioning
-Node integration
-```
-
----
-
-# 31. Design Principles
-
-PotholeNet-ML follows these principles:
-
-### Fine-tune, don't train from scratch
-
-Use pretrained YOLO11 weights.
-
-### One detector class
-
-```text
-0 = pothole
-```
-
-Keep the initial detector simple.
-
-### Separate severity from detection
-
-Detection answers:
-
-```text
-"Where is the pothole?"
-```
-
-Severity answers:
-
-```text
-"How serious does it appear?"
-```
-
-These should remain separate systems.
-
-### Prevent data leakage
-
-Sequence-aware splitting is mandatory for frame/video-derived data.
-
-### Validate before training
-
-A dataset with annotation errors should not be used for model training.
-
-### Test only after model decisions
-
-The test set should remain untouched during iterative development.
-
-### Reproducibility
-
-Every training run should record:
-
-* model
-* dataset
-* dataset counts
-* software versions
-* GPU
-* configuration
-* hyperparameters
-* source revision
-* training results
-
----
-
-# 32. Production Readiness Checklist
-
-## Dataset
-
-* [ ] RDD2022 license verified
-* [ ] Pothole-600 license verified
-* [ ] Custom dataset provenance recorded
-* [ ] Labels converted to YOLO format
-* [ ] Class mapping verified
-* [ ] Sequence-aware split verified
-* [ ] No missing image/label pairs
-* [ ] No invalid class IDs
-* [ ] No invalid bounding boxes
-* [ ] Duplicate checks completed
-* [ ] Near-duplicate leakage checked
-* [ ] Visual QC completed
-* [ ] Validator reports 0 errors
-
-## Model
-
-* [ ] YOLO11n baseline trained
-* [ ] YOLO11s comparison completed
-* [ ] YOLO11m evaluated if appropriate for VRAM
-* [ ] Validation metrics recorded
-* [ ] Test evaluation completed only after final decisions
-* [ ] False positives analyzed
-* [ ] False negatives analyzed
-* [ ] Final model selected
-
-## Severity
-
-* [ ] Detector-independent severity module
-* [ ] Severity thresholds calibrated
-* [ ] Human severity labels collected
-* [ ] Estimate-only disclaimer retained
-* [ ] No unsupported depth/dimension claims
-
-## API
-
-* [x] FastAPI service
-* [x] `/health`
-* [x] `/predict`
-* [x] Model loaded once
-* [x] Request-size limits
-* [x] File validation
-* [x] Temporary-file cleanup
-* [x] Structured logging
-* [ ] Rate limiting
-* [ ] Hard inference timeout
-* [ ] Production monitoring
-
-## Backend
-
-* [x] Node.js integration example
-* [ ] Integrate with existing backend
-* [ ] Authentication/authorization
-* [ ] Rate limiting
-* [ ] ML timeout handling
-* [ ] Error handling
-* [ ] Production logging
-
----
-
-# 33. Final Target
-
-The finished system should look like:
-
-```text
-Indian Road Image
-       │
-       ▼
-Node.js Backend
-       │
-       ▼
-PotholeNet-ML
-       │
-       ├───────────────┐
-       ▼               ▼
-   YOLO11 Detector   Severity
-       │               │
-       └───────┬───────┘
-               ▼
-        Detection Result
-               │
-               ▼
-         Node.js API
-               │
-               ▼
-            Frontend
-```
-
-The immediate objective is **not additional feature development**.
-
-The immediate objective is:
-
-```text
-504 validation errors
-        ↓
-FIX DATASET
-        ↓
-0 validation errors
-        ↓
-VISUAL QC
-        ↓
-YOLO11 BASELINE
-        ↓
-EVALUATE
-        ↓
-ITERATE
-```
-
-Once the first clean training/evaluation run exists, model performance—not additional scaffolding—should determine the next engineering decision.
+Issues and PRs that improve dataset quality, add real background examples, or extend the FP/FN review tooling are the most valuable contributions at this stage — the codebase itself is functionally complete for a first iteration; the data is the bottleneck.
