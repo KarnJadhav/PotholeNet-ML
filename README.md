@@ -1231,32 +1231,32 @@ A fine-tuned YOLO11 pothole detection microservice with a decoupled, rule-based 
                      └────────┬─────────┘
                               │ HTTP / multipart
                               ▼
-                ┌────────────────────────────┐
-                │   PotholeNet-ML FastAPI     │
-                │   (deployed on Render)      │
-                │                              │
-                │  POST /predict               │
-                │       │                       │
-                │       ▼                       │
-                │  ML_BACKEND=onnx:             │
-                │  ONNX Runtime (CPU, torch-    │
-                │  free) — app/inference_onnx.py│
-                │       │                       │
-                │       ▼                       │
-                │  Severity Estimator           │
-                │  (separate, rule-based)       │
-                └──────────────┬───────────────┘
+                ┌────────────────────────────────┐
+                │   PotholeNet-ML FastAPI        │
+                │   (deployed on Render)         │
+                │                                │
+                │  POST /predict                 │
+                │       │                        │
+                │       ▼                        │
+                │  ML_BACKEND=onnx:              │
+                │  ONNX Runtime (CPU, torch-     │
+                │  free) — app/inference_onnx.py │
+                │       │                        │
+                │       ▼                        │
+                │  Severity Estimator            │
+                │  (separate, rule-based)        │
+                └──────────────┬─────────────────┘
                                │
                                ▼
                         Detection JSON
                                ▲
                                │ weights pulled at startup
                                │
-                ┌──────────────────────────┐
-                │   Hugging Face Hub        │
-                │   Karn81/PotholeNet-YOLO11n│
-                │   (best.pt, best.onnx)     │
-                └──────────────────────────┘
+                ┌─────────────────────────────┐
+                │   Hugging Face Hub          │
+                │   Karn81/PotholeNet-YOLO11n │
+                │   (best.pt, best.onnx)      │
+                └─────────────────────────────┘
 ```
 
 Two inference backends exist behind one `ML_BACKEND` env switch:
